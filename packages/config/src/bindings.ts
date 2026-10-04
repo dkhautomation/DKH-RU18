@@ -1,3 +1,4 @@
+import type { WorkerReference } from "./definition";
 import type {
 	InferDurableNamespaces,
 	InferExportsByType,
@@ -5,7 +6,6 @@ import type {
 	UnwrapConfig,
 } from "./inference";
 import type { Json } from "./utils";
-import type { WorkerConfigExport } from "./worker-definition";
 import type { PipelineRecord } from "cloudflare:pipelines";
 
 // JSDoc is derived from `packages/workers-utils/src/config/environment.ts` — keep both in sync.
@@ -143,6 +143,16 @@ export interface BrowserBinding extends BrowserBindingOptions {
 	type: "browser";
 }
 
+interface AnalyticsSQLBindingOptions {
+	/** Options that only apply during local development. */
+	dev?: BindingDevOptions;
+}
+
+/** An Analytics SQL binding. */
+export interface AnalyticsSQLBinding extends AnalyticsSQLBindingOptions {
+	type: "analytics";
+}
+
 interface D1BindingOptions {
 	/** The UUID of this D1 database (not required). */
 	id?: string;
@@ -183,8 +193,6 @@ interface DispatchNamespaceBindingOptions {
 export interface DispatchNamespaceBinding extends DispatchNamespaceBindingOptions {
 	type: "dispatch-namespace";
 }
-
-export type WorkerReference = string | WorkerConfigExport;
 
 type ReferencedWorkerConfig<TWorker extends WorkerReference> =
 	TWorker extends string ? never : UnwrapConfig<TWorker>;
@@ -355,6 +363,45 @@ interface PipelineBindingOptions {
 	name: string;
 	/** Options that only apply during local development. */
 	dev?: BindingDevOptions;
+}
+
+interface K2BindingOptions {
+	/** The ID of the K2 stream. */
+	stream: string;
+	/** Always uses the real stream in development. Set remote to true to suppress the usage warning; false is unsupported. */
+	dev?: BindingDevOptions;
+}
+
+/** A producer binding to a K2 stream created using the Dashboard or API. */
+export interface K2Binding extends K2BindingOptions {
+	type: "k2";
+}
+
+/** An opaque K2 record with optional application headers. */
+export interface K2Record<T extends ArrayBuffer | Uint8Array> {
+	content: T;
+	headers?: Record<string, string>;
+}
+
+/** A complete-batch append outcome. An unsuccessful append may have committed. */
+export type K2ProduceResult =
+	| { success: true }
+	| {
+			success: false;
+			error: { code: number; message: string; retryable: boolean };
+	  };
+
+/** The K2 producer RPC interface. Batches use one byte representation. */
+export interface K2Producer {
+	/**
+	 * Atomically appends a batch of opaque records to the stream.
+	 * @param records - A batch containing either all ArrayBuffers or all Uint8Arrays.
+	 * @returns The append outcome; retry only when explicitly marked retryable.
+	 * @throws RPC transport failures may reject with an unknown append outcome.
+	 */
+	send(
+		records: K2Record<ArrayBuffer>[] | K2Record<Uint8Array>[]
+	): Promise<K2ProduceResult>;
 }
 
 /** Binding to a Cloudflare Pipeline. */
@@ -637,6 +684,8 @@ interface WorkflowBindingOptions<
 	TWorker extends WorkerReference = WorkerReference,
 	TExportName extends WorkflowExportName<TWorker> = WorkflowExportName<TWorker>,
 > {
+	/** The name of the Workflow. */
+	name: string;
 	/** The name or config of the Worker that defines the Workflow. */
 	worker: TWorker;
 	/** The exported class name of the Workflow. */
@@ -644,9 +693,9 @@ interface WorkflowBindingOptions<
 }
 
 /**
- * Binding to a Workflow. `worker` is the name or config of the Worker that
- * defines the Workflow; `exportName` is the exported `WorkflowEntrypoint`
- * class name.
+ * Binding to a Workflow. `name` identifies the Workflow, `worker` is the name
+ * or config of the Worker that defines it, and `exportName` is the exported
+ * `WorkflowEntrypoint` class name.
  */
 export interface WorkflowBinding<
 	TWorker extends WorkerReference = WorkerReference,
@@ -710,6 +759,8 @@ export interface Bindings {
 	 * For reference, see https://developers.cloudflare.com/workers/wrangler/configuration/#browser-rendering
 	 */
 	browser(options?: BrowserBindingOptions): BrowserBinding;
+	/** An Analytics binding. */
+	analytics(options?: AnalyticsSQLBindingOptions): AnalyticsSQLBinding;
 	/**
 	 * Binding to a D1 database.
 	 *
@@ -779,6 +830,8 @@ export interface Bindings {
 	pipeline<TRecord extends PipelineRecord = PipelineRecord>(
 		options: PipelineBindingOptions
 	): TypedPipelineBinding<TRecord>;
+	/** A producer binding to a K2 stream created using the Dashboard or API. */
+	k2(options: K2BindingOptions): K2Binding;
 	/**
 	 * Producer binding to a Cloudflare Queue.
 	 *
@@ -853,13 +906,17 @@ export interface Bindings {
 	): WorkerBinding<TWorker, NoInfer<TExportName>>;
 	/** Binding to a Worker Loader. */
 	workerLoader(): WorkerLoaderBinding;
-	// TODO: re-enable when workflow bindings return.
-	// /**
-	//  * Create a Workflow binding.
-	//  * `worker` may be a Worker config reference or a Worker name.
-	//  * `exportName` must be a valid `WorkflowEntrypoint` export for the given Worker.
-	//  */
-	// workflow(options: WorkflowBindingOptions): WorkflowBinding;
+	/**
+	 * Create a Workflow binding.
+	 * `worker` may be a Worker config reference or a Worker name.
+	 * `exportName` must be a valid `WorkflowEntrypoint` export for the given Worker.
+	 */
+	workflow<
+		TWorker extends WorkerReference,
+		TExportName extends WorkflowExportName<TWorker>,
+	>(
+		options: WorkflowBindingOptions<TWorker, TExportName>
+	): WorkflowBinding<TWorker, NoInfer<TExportName>>;
 }
 
 export const bindings = {
@@ -877,6 +934,7 @@ export const bindings = {
 	artifacts: (options) => ({ type: "artifacts", ...options }),
 	assets: () => ({ type: "assets" }),
 	browser: (options) => ({ type: "browser", ...options }),
+	analytics: (options) => ({ type: "analytics", ...options }),
 	d1: (options) => ({ type: "d1", ...options }),
 	dispatchNamespace: (options) => ({
 		type: "dispatch-namespace",
@@ -892,6 +950,7 @@ export const bindings = {
 	media: (options) => ({ type: "media", ...options }),
 	mtlsCertificate: (options) => ({ type: "mtls-certificate", ...options }),
 	pipeline: (options) => ({ type: "pipeline", ...options }),
+	k2: (options) => ({ type: "k2", ...options }),
 	queue: (options) => ({ type: "queue", ...options }),
 	rateLimit: (options) => ({ type: "rate-limit", ...options }),
 	r2: (options) => ({ type: "r2", ...options }),
@@ -909,6 +968,5 @@ export const bindings = {
 	vpcNetwork: (options) => ({ type: "vpc-network", ...options }),
 	worker: (options) => ({ type: "worker", ...options }),
 	workerLoader: () => ({ type: "worker-loader" }),
-	// TODO: re-enable when workflow bindings return.
-	// workflow: (options) => ({ type: "workflow", ...options }),
+	workflow: (options) => ({ type: "workflow", ...options }),
 } as Bindings;

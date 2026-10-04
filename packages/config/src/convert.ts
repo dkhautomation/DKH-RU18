@@ -2,10 +2,12 @@ import {
 	UserError,
 	type RawConfig,
 	type ContainerApp,
+	type DurableObjectContainerImage,
 	type Exports,
 } from "@cloudflare/workers-utils";
 import { isParsedUnsafeBinding } from "./schema";
 import type {
+	ParsedInputConfig,
 	ParsedInputContainerConfig,
 	ParsedInputSettingsConfig,
 	ParsedInputWorkerConfig,
@@ -21,36 +23,28 @@ const ROLLOUT_KIND_MAP = {
 /**
  * Convert a parsed `@cloudflare/config` config into a Wrangler `RawConfig`.
  *
- * The caller is responsible for unwrapping any function/promise wrappers and
- * validating the configs against their corresponding input schemas before
- * passing them in.
+ * The caller is responsible for resolving any function/promise wrappers and
+ * parsing the configuration before passing it in.
  *
- * @param workerConfig The parsed (post-validation) Worker config.
- * @param settingsConfig The optional parsed settings config, whose fields
- * are merged onto the result.
- * @param containerExports The parsed Container exports to include in the
- * result.
+ * @param config The parsed configuration.
  * @returns The corresponding Wrangler `RawConfig`.
  */
-export function convertToWranglerConfig(
-	workerConfig: ParsedInputWorkerConfig,
-	settingsConfig?: ParsedInputSettingsConfig,
-	containerExports: ParsedInputContainerConfig[] = []
-): RawConfig {
+export function convertToWranglerConfig(config: ParsedInputConfig): RawConfig {
 	const result: RawConfig = {};
+	const { worker, containers } = config;
 
-	convertTopLevel(workerConfig, result);
-	convertBindingsAndAssets(workerConfig, result);
-	convertExports(workerConfig, result);
-	convertDomains(workerConfig, result);
-	convertTriggers(workerConfig, result);
-	convertTailConsumers(workerConfig, result);
-
-	if (settingsConfig !== undefined) {
-		convertSettings(settingsConfig, result);
+	if (worker !== undefined) {
+		convertTopLevel(worker, result);
+		convertBindingsAndAssets(worker, result);
+		convertExports(worker, result);
+		convertDomains(worker, result);
+		convertTriggers(worker, result);
+		convertTailConsumers(worker, result);
 	}
-	if (containerExports.length > 0) {
-		result.containers = containerExports.map((container) =>
+
+	convertSettings(config, result);
+	if (containers.length > 0) {
+		result.containers = containers.map((container) =>
 			convertContainer(container)
 		);
 	}
@@ -59,13 +53,6 @@ export function convertToWranglerConfig(
 }
 
 function convertContainer(container: ParsedInputContainerConfig): ContainerApp {
-	if (container.schedulingPolicy === "durable-object") {
-		throw new UserError(
-			"Durable Object-managed Containers are not currently supported by `convertToWranglerConfig()`.",
-			{ telemetryMessage: false }
-		);
-	}
-
 	const converted: ContainerApp = {
 		name: container.name,
 	};
@@ -77,6 +64,26 @@ function convertContainer(container: ParsedInputContainerConfig): ContainerApp {
 	}
 	if (container.unsafe !== undefined) {
 		converted.unsafe = container.unsafe;
+	}
+	if (container.ssh !== undefined) {
+		converted.ssh = container.ssh;
+	}
+	if (container.authorizedKeys !== undefined) {
+		converted.authorized_keys = container.authorizedKeys.map(
+			({ name, publicKey }) => ({ name, public_key: publicKey })
+		);
+	}
+	if (container.schedulingPolicy === "durable-object") {
+		converted.scheduling_policy = "durable_object";
+		if (container.images !== undefined) {
+			converted.images = Object.fromEntries(
+				Object.entries(container.images).map(([name, image]) => [
+					name,
+					convertDurableObjectContainerImage(image),
+				])
+			);
+		}
+		return converted;
 	}
 
 	converted.image =
@@ -115,14 +122,6 @@ function convertContainer(container: ParsedInputContainerConfig): ContainerApp {
 	if (container.schedulingPolicy !== undefined) {
 		converted.scheduling_policy = container.schedulingPolicy;
 	}
-	if (container.ssh !== undefined) {
-		converted.ssh = container.ssh;
-	}
-	if (container.authorizedKeys !== undefined) {
-		converted.authorized_keys = container.authorizedKeys.map(
-			({ name, publicKey }) => ({ name, public_key: publicKey })
-		);
-	}
 	if (container.constraints !== undefined) {
 		converted.constraints = container.constraints;
 	}
@@ -139,6 +138,32 @@ function convertContainer(container: ParsedInputContainerConfig): ContainerApp {
 		}
 	}
 
+	return converted;
+}
+
+type DurableObjectInputImage = NonNullable<
+	Extract<
+		ParsedInputContainerConfig,
+		{ schedulingPolicy: "durable-object" }
+	>["images"]
+>[string];
+
+function convertDurableObjectContainerImage(
+	image: DurableObjectInputImage
+): DurableObjectContainerImage {
+	if ("reference" in image) {
+		return { image: image.reference };
+	}
+
+	const converted: DurableObjectContainerImage = {
+		dockerfile: image.dockerfile,
+	};
+	if (image.buildContext !== undefined) {
+		converted.build_context = image.buildContext;
+	}
+	if (image.buildVars !== undefined) {
+		converted.build_vars = image.buildVars;
+	}
 	return converted;
 }
 
@@ -262,6 +287,9 @@ function convertObservability(
 	if (observability.redactQueryString !== undefined) {
 		out.redact_query_string = observability.redactQueryString;
 	}
+	if (observability.issues !== undefined) {
+		out.issues = { enabled: observability.issues.enabled };
+	}
 	if (observability.logs !== undefined) {
 		const logs: NonNullable<NonNullable<RawConfig["observability"]>["logs"]> =
 			{};
@@ -345,6 +373,7 @@ function convertBindingsAndAssets(
 	const mtlsCertificates: NonNullable<RawConfig["mtls_certificates"]> = [];
 	const hyperdrive: NonNullable<RawConfig["hyperdrive"]> = [];
 	const pipelines: NonNullable<RawConfig["pipelines"]> = [];
+	const k2: NonNullable<RawConfig["k2"]> = [];
 	const flagship: NonNullable<RawConfig["flagship"]> = [];
 	const aiSearch: NonNullable<RawConfig["ai_search"]> = [];
 	const aiSearchNamespaces: NonNullable<RawConfig["ai_search_namespaces"]> = [];
@@ -453,6 +482,13 @@ function convertBindingsAndAssets(
 				});
 				break;
 			}
+			case "analytics": {
+				result.analytics = omitUndefined({
+					binding: name,
+					remote: binding.dev?.remote,
+				});
+				break;
+			}
 			case "d1": {
 				d1Databases.push(
 					omitUndefined({
@@ -556,6 +592,16 @@ function convertBindingsAndAssets(
 					omitUndefined({
 						binding: name,
 						stream: binding.name,
+						remote: binding.dev?.remote,
+					})
+				);
+				break;
+			}
+			case "k2": {
+				k2.push(
+					omitUndefined({
+						binding: name,
+						stream: binding.stream,
 						remote: binding.dev?.remote,
 					})
 				);
@@ -697,17 +743,15 @@ function convertBindingsAndAssets(
 				workerLoaders.push({ binding: name });
 				break;
 			}
-			// TODO: re-enable when workflow bindings return.
-			// case "workflow": {
-			// 	workflows.push(
-			// 		omitUndefined({
-			// 			binding: name,
-			// 			class_name: binding.exportName,
-			// 			script_name: binding.worker,
-			// 		})
-			// 	);
-			// 	break;
-			// }
+			case "workflow": {
+				workflows.push({
+					binding: name,
+					name: binding.name,
+					class_name: binding.exportName,
+					script_name: binding.worker,
+				});
+				break;
+			}
 		}
 	}
 
@@ -732,6 +776,9 @@ function convertBindingsAndAssets(
 	}
 	if (pipelines.length) {
 		result.pipelines = pipelines;
+	}
+	if (k2.length) {
+		result.k2 = k2;
 	}
 	if (flagship.length) {
 		result.flagship = flagship;
@@ -834,6 +881,23 @@ function convertExports(
 	for (const [exportName, value] of Object.entries(exports)) {
 		if (value.type === "worker") {
 			converted[exportName] = value;
+			continue;
+		}
+		if (value.type === "workflow") {
+			const { defaultRetention, ...workflow } = value;
+			converted[exportName] = {
+				...workflow,
+				...(defaultRetention !== undefined && {
+					default_retention: {
+						...(defaultRetention.successRetention !== undefined && {
+							success_retention: defaultRetention.successRetention,
+						}),
+						...(defaultRetention.errorRetention !== undefined && {
+							error_retention: defaultRetention.errorRetention,
+						}),
+					},
+				}),
+			};
 			continue;
 		}
 
@@ -972,6 +1036,12 @@ function convertTriggers(
 						protocol: trigger.protocol,
 						port: trigger.port,
 						address: trigger.address,
+						...(trigger.protocol === "udp"
+							? {
+									idle_timeout_ms: trigger.idleTimeoutMs,
+									max_pending_bytes: trigger.maxPendingBytes,
+								}
+							: {}),
 					})
 				);
 				break;

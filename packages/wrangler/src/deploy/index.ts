@@ -4,6 +4,7 @@ import {
 } from "@cloudflare/containers-shared";
 import { deploy } from "@cloudflare/deploy-helpers";
 import {
+	CommandLineArgsError,
 	getDockerPath,
 	getDurableObjectContainerApps,
 	getWorkerNameFromProject,
@@ -26,15 +27,37 @@ import {
 	cleanupDestination,
 	mergeDeployConfigArgs,
 } from "../deployment-bundle/merge-config-args";
+import {
+	routeZoneArgs,
+	validateRouteZoneArgs,
+} from "../deployment-bundle/route-zone-args";
 import { experimentalNewConfigArg } from "../experimental-config/cli-flag";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
 import { syncWorkersSite } from "../sites";
 import { detectAgent } from "../utils/detect-agent";
 import { getScriptName } from "../utils/getScriptName";
+import { durableObjectsCodeUpdateModeArg } from "../versions/deployment-args";
 import { maybeRunAutoConfig, promptForMissingDeployConfig } from "./autoconfig";
 import { maybeDelegateToOpenNextDeployCommand } from "./open-next";
 import type { Config } from "@cloudflare/workers-utils";
+
+function parseEventCode(value: string | string[]): string {
+	if (Array.isArray(value)) {
+		throw new CommandLineArgsError("--event-code expects a single value.", {
+			telemetryMessage: "deploy event code multiple values",
+		});
+	}
+
+	const eventCode = value.trim();
+	if (!eventCode) {
+		throw new CommandLineArgsError("--event-code cannot be empty.", {
+			telemetryMessage: "deploy event code empty",
+		});
+	}
+
+	return eventCode;
+}
 
 export const deployCommand = createCommand({
 	metadata: {
@@ -47,6 +70,14 @@ export const deployCommand = createCommand({
 	args: {
 		...experimentalNewConfigArg,
 		...sharedDeployVersionsArgs,
+		...durableObjectsCodeUpdateModeArg,
+		"event-code": {
+			describe: "Create a temporary account for an event",
+			type: "string",
+			requiresArg: true,
+			hidden: true,
+			coerce: parseEventCode,
+		},
 		triggers: {
 			describe: "cron schedules to attach",
 			alias: ["schedule", "schedules"],
@@ -61,6 +92,7 @@ export const deployCommand = createCommand({
 			requiresArg: true,
 			array: true,
 		},
+		...routeZoneArgs,
 		domains: {
 			describe: "Custom domains to deploy to",
 			alias: "domain",
@@ -114,7 +146,16 @@ export const deployCommand = createCommand({
 		suggestSkillsAfterHandler: true,
 	},
 	validateArgs(args) {
+		if (
+			args.eventCode &&
+			!(args as typeof args & { temporary?: boolean }).temporary
+		) {
+			throw new CommandLineArgsError("--event-code requires --temporary.", {
+				telemetryMessage: "deploy event code temporary required",
+			});
+		}
 		validateDeployVersionsArgs(args, "deploy");
+		validateRouteZoneArgs(args);
 	},
 	async handler(args, { config }) {
 		await runDeployCommandHandler(args, { config });

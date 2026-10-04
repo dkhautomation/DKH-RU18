@@ -1,6 +1,9 @@
 import assert from "node:assert";
 import path from "node:path";
-import { resolveDockerHost } from "@cloudflare/containers-shared";
+import {
+	createContainerDevPlan,
+	resolveDockerHost,
+} from "@cloudflare/containers-shared";
 import {
 	configFileName,
 	DEFAULT_COMPAT_DATE,
@@ -232,6 +235,11 @@ function getLoginOrRefreshFailureErrorMessage(
 			" Your auth token has expired and could not be refreshed, and the login attempt was unsuccessful.\n" +
 			"Either:\n" +
 			` - Run \`wrangler login\` to try again${localFallback}${whoamiTip}`,
+		"token-refresh-unreachable":
+			" Your auth token has expired and could not be refreshed because the Cloudflare auth server could not be reached. Your stored credentials were left unchanged.\n" +
+			"Either:\n" +
+			" - Check your network connection (connectivity, proxy, or IPv6) and try again; `WRANGLER_LOG=debug` shows the underlying error" +
+			`${localFallback}${whoamiTip}`,
 	};
 	const errorMessageBody = errorMessageBodies[failureReason];
 	const errorMessage = errorMessagePrefix + errorMessageBody;
@@ -330,8 +338,16 @@ async function resolveTriggers(
 
 	const connectHandlers =
 		config.connect?.map<Extract<Trigger, { type: "connect" }>>((c) => ({
-			...c,
 			type: "connect",
+			protocol: c.protocol,
+			port: c.port,
+			address: c.address,
+			...(c.protocol === "udp"
+				? {
+						idleTimeoutMs: c.idle_timeout_ms,
+						maxPendingBytes: c.max_pending_bytes,
+					}
+				: {}),
 		})) ?? [];
 
 	return [...devRoutes, ...queueConsumers, ...crons, ...connectHandlers];
@@ -419,6 +435,43 @@ async function resolveConfig(
 		},
 		config,
 	});
+	// getNormalizedContainerOptions() validates scheduler-backed and Durable
+	// Object-managed Containers and resolves account-qualified image URIs for
+	// scheduler-backed registry images. createContainerDevPlan() owns local image
+	// preparation, so scheduler-backed entries use those normalized URIs.
+	const normalizedContainers = await getNormalizedContainerOptions(config, {});
+	const dev = await resolveDevConfig(config, input);
+	const containerPlan =
+		dev.enableContainers && !dev.remote
+			? createContainerDevPlan({
+					containers: config.containers,
+					exports: config.exports,
+					containerBuildId: dev.containerBuildId,
+					configPath: config.configPath,
+				})
+			: undefined;
+	const normalizedSchedulerImageUris = new Map(
+		normalizedContainers.flatMap((container) =>
+			"image_uri" in container
+				? [[container.class_name, container.image_uri] as const]
+				: []
+		)
+	);
+	const containerDevPlan = containerPlan
+		? {
+				...containerPlan,
+				containerOptions: containerPlan.containerOptions.map((container) => {
+					const normalizedImageUri = normalizedSchedulerImageUris.get(
+						container.class_name
+					);
+					return container.image_name === undefined &&
+						"image_uri" in container &&
+						normalizedImageUri !== undefined
+						? { ...container, image_uri: normalizedImageUri }
+						: container;
+				}),
+			}
+		: undefined;
 
 	const resolved = {
 		name:
@@ -466,8 +519,9 @@ async function resolveConfig(
 			tsconfig: input.build?.tsconfig ?? config.tsconfig,
 			exports: entry.exports,
 		},
-		containers: await getNormalizedContainerOptions(config, {}),
-		dev: await resolveDevConfig(config, input),
+		containers: normalizedContainers,
+		containerDevPlan,
+		dev,
 		legacy: {
 			site: legacySite,
 		},
@@ -519,7 +573,7 @@ async function resolveConfig(
 	// for pulling containers, we need to make sure the OpenAPI config for the
 	// container API client is properly set so that we can get the correct permissions
 	// from the cloudchamber API to pull from the repository.
-	const needsPulling = resolved.containers.some(
+	const needsPulling = resolved.containerDevPlan?.containerOptions.some(
 		(c) => "image_uri" in c && c.image_uri
 	);
 	if (needsPulling && !resolved.dev.remote) {
@@ -541,11 +595,7 @@ async function resolveConfig(
 	if (resolved.dev.remote) {
 		// We're in remote mode (`--remote`)
 
-		if (
-			resolved.dev.enableContainers &&
-			resolved.containers &&
-			resolved.containers.length > 0
-		) {
+		if (resolved.dev.enableContainers && config.containers?.length) {
 			logger.once.warn(
 				"Containers are only supported in local mode, to suppress this warning set `dev.enable_containers` to `false` or pass `--enable-containers=false` to the `wrangler dev` command"
 			);
@@ -733,10 +783,10 @@ export class ConfigController extends Controller {
 
 			// Under `--experimental-new-config`, run the new-config type-gen path
 			// instead of the legacy `checkTypesDiff`.
-			if (newConfig && fileConfig.configPath) {
+			if (newConfig) {
 				await regenerateNewConfigTypes({
-					cloudflareConfigPath: fileConfig.configPath,
-					workerConfig: newConfig.parsedWorkerConfig,
+					cloudflareConfigPath: newConfig.cloudflareConfigPath,
+					workerConfig: newConfig.parsedConfig.worker,
 					types: newConfig.types,
 				});
 			}

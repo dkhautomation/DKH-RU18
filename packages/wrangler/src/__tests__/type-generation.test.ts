@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { getRuntimeHeader } from "@cloudflare/runtime-types";
 import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
 import { afterAll, beforeAll, beforeEach, describe, it, vi } from "vitest";
@@ -526,6 +527,12 @@ const bindingsConfigMock: Omit<
 		{ type: "CompiledWasm", globs: ["**/*.wasm"], fallthrough: true },
 	],
 	pipelines: [{ binding: "PIPELINE", stream: "my-pipeline" }],
+	k2: [
+		{
+			binding: "K2_BINDING",
+			stream: "0123456789abcdef0123456789abcdef",
+		},
+	],
 	assets: {
 		binding: "ASSETS_BINDING",
 		directory: "/assets",
@@ -552,6 +559,7 @@ const bindingsConfigMock: Omit<
 		},
 	],
 	vpc_networks: [],
+	analytics: { binding: "ANALYTICS_SQL_BINDING" },
 	connect: [],
 };
 
@@ -582,6 +590,38 @@ describe("generate types - CLI", () => {
 			})
 		);
 	});
+
+	it("keeps the runtime header stable after trailing whitespace is removed", async ({
+		expect,
+	}) => {
+		fs.writeFileSync(
+			"./wrangler.jsonc",
+			JSON.stringify({
+				compatibility_date: "2024-11-06",
+				vars: { value: "test" },
+			}),
+			"utf-8"
+		);
+		spy.mockResolvedValue({
+			runtimeHeader: getRuntimeHeader("1.0.0-test", "2024-11-06"),
+			runtimeTypes: "<runtime types go here>",
+		});
+
+		await runWrangler("types");
+		const generatedContent = fs.readFileSync(
+			"./worker-configuration.d.ts",
+			"utf-8"
+		);
+		const cleanedContent = generatedContent.replace(/[ \t]+$/gm, "");
+		fs.writeFileSync("./worker-configuration.d.ts", cleanedContent);
+
+		await runWrangler("types");
+
+		expect(fs.readFileSync("./worker-configuration.d.ts", "utf-8")).toBe(
+			cleanedContent
+		);
+	});
+
 	it("should error when no config file is detected", async ({ expect }) => {
 		await expect(runWrangler("types")).rejects.toMatchInlineSnapshot(
 			`[Error: No config file detected. This command requires a Wrangler configuration file.]`
@@ -790,6 +830,15 @@ describe("generate types - CLI", () => {
 				NAMESPACE_BINDING: DispatchNamespace;
 				MTLS_BINDING: Fetcher;
 				TEST_QUEUE_BINDING: Queue;
+				K2_BINDING: {
+					send(records:
+						| { content: ArrayBuffer; headers?: Record<string, string> }[]
+						| { content: Uint8Array; headers?: Record<string, string> }[]
+					): Promise<
+						| { success: true }
+						| { success: false; error: { code: number; message: string; retryable: boolean } }
+					>;
+				};
 				SECRET: SecretsStoreSecret;
 				MY_ARTIFACTS: Artifacts;
 				HELLO_WORLD: HelloWorldBinding;
@@ -802,6 +851,7 @@ describe("generate types - CLI", () => {
 				AGENT_MEMORY_BINDING: AgentMemoryNamespace;
 				LOGFWDR_SCHEMA: any;
 				BROWSER_BINDING: BrowserRun;
+				ANALYTICS_SQL_BINDING: AnalyticsSQLBinding;
 				AI_BINDING: Ai;
 				IMAGES_BINDING: ImagesBinding;
 				STREAM_BINDING: StreamBinding;
@@ -910,6 +960,15 @@ describe("generate types - CLI", () => {
 				NAMESPACE_BINDING: DispatchNamespace;
 				MTLS_BINDING: Fetcher;
 				TEST_QUEUE_BINDING: Queue;
+				K2_BINDING: {
+					send(records:
+						| { content: ArrayBuffer; headers?: Record<string, string> }[]
+						| { content: Uint8Array; headers?: Record<string, string> }[]
+					): Promise<
+						| { success: true }
+						| { success: false; error: { code: number; message: string; retryable: boolean } }
+					>;
+				};
 				SECRET: SecretsStoreSecret;
 				MY_ARTIFACTS: Artifacts;
 				HELLO_WORLD: HelloWorldBinding;
@@ -922,6 +981,7 @@ describe("generate types - CLI", () => {
 				AGENT_MEMORY_BINDING: AgentMemoryNamespace;
 				LOGFWDR_SCHEMA: any;
 				BROWSER_BINDING: BrowserRun;
+				ANALYTICS_SQL_BINDING: AnalyticsSQLBinding;
 				AI_BINDING: Ai;
 				IMAGES_BINDING: ImagesBinding;
 				STREAM_BINDING: StreamBinding;
@@ -1093,6 +1153,15 @@ describe("generate types - CLI", () => {
 				NAMESPACE_BINDING: DispatchNamespace;
 				MTLS_BINDING: Fetcher;
 				TEST_QUEUE_BINDING: Queue;
+				K2_BINDING: {
+					send(records:
+						| { content: ArrayBuffer; headers?: Record<string, string> }[]
+						| { content: Uint8Array; headers?: Record<string, string> }[]
+					): Promise<
+						| { success: true }
+						| { success: false; error: { code: number; message: string; retryable: boolean } }
+					>;
+				};
 				SECRET: SecretsStoreSecret;
 				MY_ARTIFACTS: Artifacts;
 				HELLO_WORLD: HelloWorldBinding;
@@ -1105,6 +1174,7 @@ describe("generate types - CLI", () => {
 				AGENT_MEMORY_BINDING: AgentMemoryNamespace;
 				LOGFWDR_SCHEMA: any;
 				BROWSER_BINDING: BrowserRun;
+				ANALYTICS_SQL_BINDING: AnalyticsSQLBinding;
 				AI_BINDING: Ai;
 				IMAGES_BINDING: ImagesBinding;
 				STREAM_BINDING: StreamBinding;
@@ -1898,7 +1968,7 @@ describe("generate types - CLI", () => {
 		`);
 	});
 
-	it("should generate one class-scoped binding for Durable Object-managed images", async ({
+	it("should use native Container image types without a generated environment binding", async ({
 		expect,
 	}) => {
 		fs.writeFileSync(
@@ -1940,14 +2010,11 @@ describe("generate types - CLI", () => {
 		await runWrangler("types --include-runtime=false");
 
 		const generated = fs.readFileSync("worker-configuration.d.ts", "utf-8");
-		expect(generated).not.toContain("SANDBOX_IMAGE");
-		expect(generated).not.toContain("TOOLS_IMAGE");
-		expect(generated).toContain(
-			"EXPERIMENTAL_CLOUDFLARE_CONTAINER_IMAGES: Readonly<Record<string, Readonly<Record<string, string>>>>;"
-		);
-		expect(generated).toContain(
-			"SANDBOX: DurableObjectNamespace /* Sandbox */;"
-		);
+		expect(generated).toContain(dedent`
+			interface __BaseEnv_Env {
+				SANDBOX: DurableObjectNamespace /* Sandbox */;
+			}
+		`);
 	});
 
 	it("should override vars with secrets", async ({ expect }) => {

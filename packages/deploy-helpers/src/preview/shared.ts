@@ -5,11 +5,17 @@ import {
 	getCIOverrideName,
 	getDurableObjectExports,
 	getWorkersCIBranchName,
+	isLiveDurableObjectExport,
 	UserError,
 } from "@cloudflare/workers-utils";
 import { shortHash, truncateWithSuffix } from "../shared/names";
-import type { Binding, EnvBindings } from "./api";
-import type { Config, PreviewsConfig } from "@cloudflare/workers-utils";
+import type { Binding, EnvBindings, UpdatePreviewRequestParams } from "./api";
+import type {
+	Config,
+	PreviewsConfig,
+	RawConfig,
+	RawEnvironment,
+} from "@cloudflare/workers-utils";
 
 const MAX_CONTAINER_APP_NAME_LENGTH = 253;
 
@@ -403,6 +409,8 @@ export function getBindingValue(binding: Binding): string {
 			return String(binding.certificate_id ?? "");
 		case "pipelines":
 			return String(binding.stream ?? binding.pipeline ?? "");
+		case "k2":
+			return String(binding.stream ?? "");
 		case "secrets_store_secret":
 			return binding.secret_name
 				? `${binding.store_id}/${binding.secret_name}`
@@ -422,8 +430,11 @@ export function getBindingValue(binding: Binding): string {
 	}
 }
 
-export function extractConfigBindings(config: Config): EnvBindings {
-	const previews = config.previews as PreviewsConfig | undefined;
+function extractBindings(
+	previews: RawEnvironment | undefined,
+	assets: Config["assets"],
+	omitIdentifierlessBindings = false
+): EnvBindings {
 	const env: EnvBindings = {};
 
 	const vars = previews?.vars ?? {};
@@ -443,10 +454,16 @@ export function extractConfigBindings(config: Config): EnvBindings {
 	}
 
 	for (const kv of previews?.kv_namespaces ?? []) {
+		if (omitIdentifierlessBindings && kv.id === undefined) {
+			continue;
+		}
 		env[kv.binding] = { type: "kv_namespace", namespace_id: kv.id };
 	}
 
 	for (const d1 of previews?.d1_databases ?? []) {
+		if (omitIdentifierlessBindings && d1.database_id === undefined) {
+			continue;
+		}
 		env[d1.binding] = {
 			type: "d1",
 			database_id: d1.database_id,
@@ -455,6 +472,9 @@ export function extractConfigBindings(config: Config): EnvBindings {
 	}
 
 	for (const r2 of previews?.r2_buckets ?? []) {
+		if (omitIdentifierlessBindings && r2.bucket_name === undefined) {
+			continue;
+		}
 		env[r2.binding] = {
 			type: "r2_bucket",
 			bucket_name: r2.bucket_name,
@@ -474,9 +494,34 @@ export function extractConfigBindings(config: Config): EnvBindings {
 			service: service.service,
 			environment,
 			entrypoint: service.entrypoint,
+			props: service.props,
 			...(crossAccountGrant !== undefined && {
 				cross_account_grant: crossAccountGrant,
 			}),
+		};
+	}
+
+	for (const memory of previews?.agent_memory ?? []) {
+		env[memory.binding] = {
+			type: "agent_memory",
+			namespace: memory.namespace,
+		};
+	}
+
+	for (const vpc of previews?.vpc_networks ?? []) {
+		const binding: Binding = { type: "vpc_network" };
+		if ("tunnel_id" in vpc) {
+			binding.tunnel_id = vpc.tunnel_id;
+		} else {
+			binding.network_id = vpc.network_id;
+		}
+		env[vpc.binding] = binding;
+	}
+
+	for (const binding of previews?.logfwdr?.bindings ?? []) {
+		env[binding.name] = {
+			type: "logfwdr",
+			destination: binding.destination,
 		};
 	}
 
@@ -580,6 +625,10 @@ export function extractConfigBindings(config: Config): EnvBindings {
 		};
 	}
 
+	for (const { binding, stream } of previews?.k2 ?? []) {
+		env[binding] = { type: "k2", stream };
+	}
+
 	for (const secret of previews?.secrets_store_secrets ?? []) {
 		env[secret.binding] = {
 			type: "secrets_store_secret",
@@ -622,6 +671,10 @@ export function extractConfigBindings(config: Config): EnvBindings {
 		env[previews.browser.binding] = { type: "browser" };
 	}
 
+	if (previews?.analytics) {
+		env[previews.analytics.binding] = { type: "analytics" };
+	}
+
 	if (previews?.ai) {
 		env[previews.ai.binding] = { type: "ai", staging: previews.ai.staging };
 	}
@@ -642,8 +695,8 @@ export function extractConfigBindings(config: Config): EnvBindings {
 		env[previews.version_metadata.binding] = { type: "version_metadata" };
 	}
 
-	if (config.assets?.binding) {
-		env[config.assets.binding] = { type: "assets" };
+	if (assets?.binding) {
+		env[assets.binding] = { type: "assets" };
 	}
 
 	for (const binding of previews?.unsafe?.bindings ?? []) {
@@ -652,6 +705,14 @@ export function extractConfigBindings(config: Config): EnvBindings {
 	}
 
 	return env;
+}
+
+export function extractConfigBindings(config: Config): EnvBindings {
+	return extractBindings(config.previews, config.assets);
+}
+
+export function extractBuildOutputBindings(config: RawConfig): EnvBindings {
+	return extractBindings(config, config.assets, true);
 }
 
 /**
@@ -685,11 +746,7 @@ function getDeclaredDOClassNames(config: Config): Set<string> {
 	for (const [className, entry] of Object.entries(
 		getDurableObjectExports(config.exports)
 	)) {
-		if (
-			entry.state === undefined ||
-			entry.state === "created" ||
-			entry.state === "expecting-transfer"
-		) {
+		if (isLiveDurableObjectExport(entry)) {
 			declared.add(className);
 		}
 	}
@@ -762,9 +819,11 @@ export function previewContainerAppName(
 	);
 }
 
-export function assemblePreviewScriptSettings(config: Config) {
+export function assemblePreviewScriptSettings(
+	config: Config
+): UpdatePreviewRequestParams {
 	const previews = config.previews;
-	const result: Record<string, unknown> = {};
+	const result: UpdatePreviewRequestParams = {};
 
 	const observability = previews?.observability ?? config.observability;
 	if (observability !== undefined) {

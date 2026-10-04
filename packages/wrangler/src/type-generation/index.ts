@@ -3,12 +3,10 @@ import * as fs from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { RUNTIME_TYPES_MARKER } from "@cloudflare/runtime-types";
 import {
-	CONTAINER_IMAGES_BINDING,
 	CommandLineArgsError,
 	configFileName,
 	experimental_readRawConfig,
 	FatalError,
-	getDurableObjectContainerApps,
 	parseJSONC,
 	UserError,
 } from "@cloudflare/workers-utils";
@@ -32,6 +30,7 @@ import {
 	TOP_LEVEL_ENV_NAME,
 	validateEnvInterfaceNames,
 } from "./helpers";
+import { K2_PRODUCER_TYPE } from "./k2";
 import { fetchPipelineTypes } from "./pipeline-schema";
 import { generateRuntimeTypes } from "./runtime";
 import { logRuntimeTypesMessage } from "./runtime/log-runtime-types-message";
@@ -41,9 +40,6 @@ import type {
 	RawConfig,
 	RawEnvironment,
 } from "@cloudflare/workers-utils";
-
-const CONTAINER_IMAGES_BINDING_TYPE =
-	"Readonly<Record<string, Readonly<Record<string, string>>>>";
 
 export interface GenerateTypesOptions {
 	/**
@@ -2272,6 +2268,20 @@ function collectCoreBindings(
 			addBinding(queue.binding, "Queue", "queues_producers", envName);
 		}
 
+		for (const [index, stream] of (env.k2 ?? []).entries()) {
+			if (!stream.binding) {
+				throwMissingBindingError({
+					binding: stream,
+					bindingType: "k2",
+					configPath: args.config,
+					envName,
+					fieldName: "binding",
+					index,
+				});
+			}
+			addBinding(stream.binding, K2_PRODUCER_TYPE, "k2", envName);
+		}
+
 		for (const [index, secret] of (env.secrets_store_secrets ?? []).entries()) {
 			if (!secret.binding) {
 				throwMissingBindingError({
@@ -2486,6 +2496,25 @@ function collectCoreBindings(
 			}
 		}
 
+		if (env.analytics) {
+			if (!env.analytics.binding) {
+				throwMissingBindingError({
+					binding: env.analytics,
+					bindingType: "analytics",
+					configPath: args.config,
+					envName,
+					fieldName: "binding",
+				});
+			} else {
+				addBinding(
+					env.analytics.binding,
+					"AnalyticsSQLBinding",
+					"analytics",
+					envName
+				);
+			}
+		}
+
 		if (env.ai) {
 			if (!env.ai.binding) {
 				throwMissingBindingError({
@@ -2563,15 +2592,6 @@ function collectCoreBindings(
 
 		if (env.assets?.binding) {
 			addBinding(env.assets.binding, "Fetcher", "assets", envName);
-		}
-
-		if (getDurableObjectContainerApps(env.containers).length > 0) {
-			addBinding(
-				CONTAINER_IMAGES_BINDING,
-				CONTAINER_IMAGES_BINDING_TYPE,
-				"container_images",
-				envName
-			);
 		}
 	}
 
@@ -3301,6 +3321,24 @@ function collectCoreBindingsPerEnvironment(
 			});
 		}
 
+		for (const [index, stream] of (env.k2 ?? []).entries()) {
+			if (!stream.binding) {
+				throwMissingBindingError({
+					binding: stream,
+					bindingType: "k2",
+					configPath: args.config,
+					envName,
+					fieldName: "binding",
+					index,
+				});
+			}
+			bindings.push({
+				bindingCategory: "k2",
+				name: stream.binding,
+				type: K2_PRODUCER_TYPE,
+			});
+		}
+
 		for (const [index, secret] of (env.secrets_store_secrets ?? []).entries()) {
 			if (!secret.binding) {
 				throwMissingBindingError({
@@ -3483,6 +3521,24 @@ function collectCoreBindingsPerEnvironment(
 			}
 		}
 
+		if (env.analytics) {
+			if (!env.analytics.binding) {
+				throwMissingBindingError({
+					binding: env.analytics,
+					bindingType: "analytics",
+					configPath: args.config,
+					envName,
+					fieldName: "binding",
+				});
+			} else {
+				bindings.push({
+					bindingCategory: "analytics",
+					name: env.analytics.binding,
+					type: "AnalyticsSQLBinding",
+				});
+			}
+		}
+
 		if (env.ai) {
 			if (!env.ai.binding) {
 				throwMissingBindingError({
@@ -3578,14 +3634,6 @@ function collectCoreBindingsPerEnvironment(
 				bindingCategory: "assets",
 				name: env.assets.binding,
 				type: "Fetcher",
-			});
-		}
-
-		if (getDurableObjectContainerApps(env.containers).length > 0) {
-			bindings.push({
-				bindingCategory: "container_images",
-				name: CONTAINER_IMAGES_BINDING,
-				type: CONTAINER_IMAGES_BINDING_TYPE,
 			});
 		}
 

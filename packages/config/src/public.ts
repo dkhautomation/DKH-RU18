@@ -11,6 +11,7 @@ export type {
 	AiSearchBinding,
 	AiSearchNamespaceBinding,
 	AnalyticsEngineDatasetBinding,
+	AnalyticsSQLBinding,
 	ArtifactsBinding,
 	AssetsBinding,
 	BrowserBinding,
@@ -21,6 +22,10 @@ export type {
 	HyperdriveBinding,
 	ImagesBinding,
 	JsonBinding,
+	K2Binding,
+	K2Producer,
+	K2Record,
+	K2ProduceResult,
 	KvBinding,
 	LogfwdrBinding,
 	MediaBinding,
@@ -45,7 +50,6 @@ export type {
 	VpcServiceBinding,
 	WorkerBinding,
 	WorkerLoaderBinding,
-	WorkerReference,
 	WorkflowBinding,
 } from "./bindings";
 export { bindings } from "./bindings";
@@ -67,6 +71,8 @@ export type {
 	DurableObjectExpectingTransferExport,
 	WorkerEntrypointExport,
 	WorkerEntrypointExportOptions,
+	WorkflowExport,
+	WorkflowExportOptions,
 } from "./exports";
 export { exports } from "./exports";
 export type {
@@ -75,20 +81,16 @@ export type {
 	InferMainModule,
 	UnwrapConfig,
 } from "./inference";
-export type { ConfigContext } from "./definition";
-export type { ContainerConfig, SettingsConfig, WorkerConfig } from "./types";
 export type {
-	ContainerConfigExport,
-	ContainerConfigInput,
-} from "./container-definition";
-export { defineContainer } from "./container-definition";
+	ConfigContext,
+	ContainerDefinition,
+	WorkerDefinition,
+	WorkerReference,
+} from "./definition";
+export { defineConfig, defineContainer, defineWorker } from "./definition";
 export type {
-	WorkerConfigExport,
-	WorkerConfigInput,
-} from "./worker-definition";
-export { defineWorker } from "./worker-definition";
-export type {
-	SettingsConfigExport,
-	SettingsConfigInput,
-} from "./settings-definition";
-export { defineSettings } from "./settings-definition";
+	CloudflareConfig,
+	ContainerConfig,
+	Settings,
+	WorkerConfig,
+} from "./types";

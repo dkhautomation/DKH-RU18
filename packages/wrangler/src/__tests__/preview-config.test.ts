@@ -40,6 +40,7 @@ describe("Preview configuration conversion", () => {
 				TEXT: { type: "plain_text", text: "production-text" },
 				JSON: { type: "json", json: { source: "production-json" } },
 				BROWSER: { type: "browser" },
+				ANALYTICS_SQL: { type: "analytics" },
 				AI: { type: "ai", staging: true },
 				IMAGES: { type: "images" },
 				STREAM: { type: "stream" },
@@ -106,6 +107,7 @@ describe("Preview configuration conversion", () => {
 		expect(Object.keys(result.config)).toEqual([
 			"vars",
 			"browser",
+			"analytics",
 			"ai",
 			"images",
 			"stream",
@@ -136,6 +138,7 @@ describe("Preview configuration conversion", () => {
 		]);
 		expect(result.config).toMatchObject({
 			vars: { TEXT: "<REPLACE_ME>", JSON: "<REPLACE_ME>" },
+			analytics: { binding: "ANALYTICS_SQL" },
 			ai: { binding: "AI", staging: true },
 			kv_namespaces: [{ binding: "KV", id: "<REPLACE_ME>" }],
 			r2_buckets: [
@@ -164,7 +167,11 @@ describe("Preview configuration conversion", () => {
 	}) => {
 		expect(
 			convertPreviewBaseToPreviewsConfig({
-				observability: { enabled: true, logs: { enabled: false } },
+				observability: {
+					enabled: true,
+					issues: { enabled: true },
+					logs: { enabled: false },
+				},
 				logpush: false,
 				limits: { subrequests: 100 },
 				placement: { mode: "smart" },
@@ -179,7 +186,11 @@ describe("Preview configuration conversion", () => {
 			} as Parameters<typeof convertPreviewBaseToPreviewsConfig>[0])
 		).toEqual({
 			config: {
-				observability: { enabled: true, logs: { enabled: false } },
+				observability: {
+					enabled: true,
+					issues: { enabled: true },
+					logs: { enabled: false },
+				},
 				logpush: false,
 				limits: { subrequests: 100 },
 				placement: { mode: "smart" },
@@ -195,6 +206,22 @@ describe("Preview configuration conversion", () => {
 			blockingDeploymentMessages: [
 				"This Worker uses Durable Objects. They are not included in the suggested Preview configuration.\nFollow the setup instructions so each Preview automatically gets a new, isolated Durable Object namespace:\nhttps://developers.cloudflare.com/workers/previews/resources/#durable-objects",
 			],
+		});
+	});
+
+	test("copies an Issues-only Preview Base observability configuration", ({
+		expect,
+	}) => {
+		expect(
+			convertPreviewBaseToPreviewsConfig({
+				observability: { issues: { enabled: true } },
+			} as Parameters<typeof convertPreviewBaseToPreviewsConfig>[0])
+		).toEqual({
+			config: {
+				observability: { issues: { enabled: true } },
+			},
+			messages: [],
+			blockingDeploymentMessages: [],
 		});
 	});
 
